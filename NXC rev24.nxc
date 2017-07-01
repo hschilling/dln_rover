@@ -1,0 +1,525 @@
+/*####################### "SLAVE NXT"Program #######################
+Compile, download, and run this program on the NXT brick
+NXT brick must have firmware version 1.29 or later. (to support
+floating point math)
+This program receives bluetooth messages from the Python 'glue'
+program which tell the rover to drive its moters.
+Taking pictures with the cameras is handled by the Python script.
+Note the special nomenclature (a,b,and c) commands.
+SENSOR CONFIGURATION:
+Port 2: HiTechnic accelerometer
+Port 3: NXT ultrasonic
+Port 4: HiTechnic compass
+If these sensors are not plugged in correctly, the program will fail
+The LCD screen will read "file erro" and quit. So either comment out
+the set Sensor method, or attach the correct sensors.
+#################################################################*/
+
+//alliases
+#define FILE_NAME "data.txt"
+#define DELIMTERASCIICODE 32 // Space character
+#include "NXCDefs.h"
+
+//Global Variables
+
+//time
+float firstTick; //first time stamp
+string time_STR; //time (in ms) as a string
+float currentTick; //current timestamp
+float time; //absolute time, in milliseconds
+
+//file handling
+byte handle;
+unsigned int result;
+int file_size = 10000000000; //specify initial size of text file
+byte x; //number of bytes of info written to text file
+
+//########## SENSORS DATA ##########
+
+//Numerical:
+int xval;            //x axis accelerometer
+int yval;            //y axis accelerometer
+int zval;            //z axis accelerometer
+int originalHeading; //original compass angle
+int battery;         //battery voltage
+int B_mod;           //modded rotations of motor B
+int B_raw;           //raw rotations of motor B
+int rawHeading;
+int newHeading;
+
+//string
+string str_xval;
+string str_yval;
+string str_zval;
+string distance;           //ultrasonic distance
+string str_newHeading;     //absolute heading
+string B_rotation;         //B motor rotation sensor
+string voltage;
+
+sub SendSensorData()
+{
+    //Battery parsing (floating point is difficult in NXC)
+    //so I made this routine instead
+    float battery = BatteryLevel() / 100;
+    string bat = NumToStr(battery);
+    string first = SubStr(bat, 0, 1);
+    string last = SubStr(bat, 1, 1);
+    voltage = StrCat(first, ".", last);
+    SendResponseString(0, voltage);   //PYTHON MAILBOX 10
+    
+    //3-axis Accelerometer
+    int count;
+    byte inI2Ccmd[];
+    byte outbuf[];
+    ArrayInit(inI2Ccmd, 0, 2);
+    inI2Ccmd[0] = 0x02;
+    inI2Ccmd[1] = 0x42;
+    count=8;
+    I2CBytes(IN_2, inI2Ccmd, count, outbuf);
+    xval=outbuf[0];
+    yval=outbuf[1];
+    zval=outbuf[2];
+    if (xval > 127) xval-=256;
+    xval=xval*4 + outbuf[3];
+    if (yval > 127) yval-=256;
+    yval=yval*4 + outbuf[4];
+    if (zval > 127) zval-=256;
+    zval=zval*4 + outbuf[5];
+
+
+    xval = (xval * 180)   / 200;
+    yval = (yval * 180)   / 200;
+    zval = (zval * 180)   / 200;
+
+    str_xval = NumToStr(xval);
+    SendResponseString(1, str_xval);        //PYTHON MAILBOX 11
+    str_yval = NumToStr(yval);
+    SendResponseString(2, str_yval);        //PYTHON MAILBOX 12
+
+    //Ultrasonic Sensor
+    if (SensorUS(IN_3) == 255)
+       distance = "out of range";
+    else
+        distance = NumToStr(SensorUS(IN_3));
+     SendResponseString(4, distance);         //PYTHON MAILBOX 13
+
+     //taking raw compass heading and adjusting it to be an absolute heading gyro
+    rawHeading = SensorHTCompass(IN_4);
+    if (rawHeading < originalHeading)
+       newHeading = 360 - (originalHeading - rawHeading);
+    else
+        newHeading = rawHeading - originalHeading;
+
+     str_newHeading = NumToStr(newHeading);
+
+     SendResponseString(5, str_newHeading);    //PYTHON MAILBOX 15
+
+     //Camera Motor (Port B) Rotation moded for absolute heading
+     B_raw = MotorRotationCount(OUT_B);
+     B_mod = abs(B_raw);
+     B_mod %= 360;
+     B_rotation = NumToStr(B_mod);
+     SendResponseString(6, B_rotation);       //PYTHON MAILBOX 16
+}
+
+sub BTCheck(int conn){
+   if (!BluetoothStatus(conn)==NO_ERR){
+      TextOut(5,LCD_LINE2,"Error");
+      Wait(1000);
+      Stop(true);
+   }
+}
+
+sub updateHeading()
+{
+    //called during the turn on gyro method
+    rawHeading = SensorHTCompass(IN_4);
+    if (rawHeading < originalHeading)
+       newHeading = 360 - (originalHeading - rawHeading);
+    else
+        newHeading = rawHeading - originalHeading;
+
+     str_newHeading = NumToStr(newHeading);
+}
+
+sub DoCommand(string input, int power) //a commands sent from website driving page
+{
+    switch (input)
+     {
+      case "forward": //forward one full wheel rotation
+           RotateMotorEx(OUT_AC, power, 360, 0,true, false);   //sync two motors
+           break;
+      case "backward": //backward one full wheel rotatation
+           RotateMotorEx(OUT_AC,power,-360,0,true, false);   //sync two motors
+           break;
+      case "right": //right turn on time (about 45 degrees)
+           OnFwd(OUT_A, power);
+           OnRev(OUT_C, power);
+           Wait(300);
+           Off(OUT_AC);
+           break;
+      case "left": //left turn on time (about 45 degrees)
+           OnRev(OUT_A, power);
+           OnFwd(OUT_C, power);
+           Wait(300);
+           Off(OUT_AC);
+           break;
+      case "stop":
+           Off(OUT_ABC);
+           break;
+      case "panleft": //camera pan left 15 degrees
+           RotateMotor(OUT_B, -15, 15); //power is hard coded
+           Off(OUT_B);
+           break;
+      case "panright": //camera pan right 15 degrees
+           RotateMotor(OUT_B,15, 15);  //hard coded power
+           Off(OUT_B);
+           break;
+      case "camerapan": //camera pan 360
+           RotateMotor(OUT_B, 15, 360);   //hard coded power
+           Off(OUT_B);
+           break;
+      default:
+           ClearScreen();
+           TextOut(5,5,"defaultCommandMove");
+           break;
+      } //end case input
+} //end sub
+
+sub DoScriptCommandMove(string command_name, string direction, int power, int third)
+{  //b commands (from Blind driving)
+            switch (command_name)
+             {
+                    case "timeDrive": //drives robot forward/backward for a certain period of time
+                         if (direction == "forward")
+                         {
+                            OnFwd(OUT_AC, power);
+                            Wait(third);//in ms
+                            Off(OUT_AC);
+                            break;
+                          }
+                          else if (direction == "backward")
+                          {
+                               OnRev(OUT_AC, power);
+                               Wait(third);
+                               Off(OUT_AC);
+                               break;
+                          }
+                          else{ TextOut(25,25, "T.D.Error"); break; }
+                    case "rotationDrive": //drives robot forward/backward for a certain degrees of rotation
+                         if (direction == "forward")
+                         {
+                               RotateMotorEx(OUT_AC, power, third, 0,true, true); //sync two motors
+                               break;
+                         }
+                         else if (direction == "backward")
+                         {
+                              int newPower = -(power);
+                              RotateMotorEx(OUT_AC, newPower, third, 0,true, true);  //sync two motors
+                              break;
+                         }
+                         else{ TextOut(25,25, "R.D.Error"); break; }
+                    case "ultrasonicDrive":
+                         /*drive robot forward/backward until within/away
+                           from a certain object using distance sensor  */
+                         int distance = SensorUS(IN_3);
+                         if(direction == "forward")
+                         {
+                              while(distance >= third)
+                              {
+                                   OnFwd(OUT_AC, power);
+                                   distance = SensorUS(IN_3);
+                                   TextOut(0, LCD_LINE1, NumToStr(distance));
+                              }
+                              Off(OUT_AC);
+                         }
+                         else if(direction == "backward")
+                         {
+                              int newPower = -(power);
+                              while(distance <= third)
+                              {
+                                  OnRev(OUT_AC, power);
+                                  distance = SensorUS(IN_3);
+                                   TextOut(0, LCD_LINE1, NumToStr(distance));
+                              }
+                              Off(OUT_AC);
+                         }
+                         else{ TextOut(25,25, "U.D.Error");  }
+                         break;
+                    case "timeTurn":  //turn left/right for a certain amount of time
+                         if (direction == "left")
+                         {
+                              OnRev(OUT_A, power);
+                              OnFwd(OUT_C, power);
+                              Wait(third);
+                              Off(OUT_AC);
+                              break;
+                         }
+                         else if (direction == "right")
+                         {
+                              OnFwd(OUT_A, power);
+                              OnRev(OUT_C, power);
+                              Wait(third);
+                              Off(OUT_AC);
+                              break;
+                         }
+                         else{ TextOut(25,25, "T.T.Error"); break;}
+                    case "cameraHeading":  //turns camera right to a certain heading
+                         int desiredHeading = third;
+                         int upperBound = desiredHeading + 2;
+                         int lowerBound = desiredHeading - 2;
+                         while (B_mod > upperBound || B_mod < lowerBound)
+                         {
+                            TextOut(0, LCD_LINE3, NumToStr(B_mod));
+                            OnFwd(OUT_B, power);
+                            B_raw = MotorRotationCount(OUT_B);
+                            B_mod = abs(B_raw);
+                            B_mod %= 360;
+                         }
+                          Off(OUT_B);
+                         break;
+
+
+                    case "gyroTurn":
+                    //turn robot to a certain gyro heading
+                         if (direction == "left")
+                         {
+                               int desiredHeading = third;
+                               int upperBound = desiredHeading + 5;
+                               int lowerBound = desiredHeading - 5;
+
+                               while (newHeading > upperBound || newHeading < lowerBound)
+                               {
+                                    updateHeading();
+                                    OnFwd(OUT_C, power);
+                                    OnRev(OUT_A, power);
+                                }
+                                Off(OUT_C);
+                                break;
+                         }
+                         else if (direction == "right")
+                         {
+                               int desiredHeading = third;
+                               int upperBound = desiredHeading + 5;
+                               int lowerBound = desiredHeading - 5;
+
+                               while (newHeading > upperBound || newHeading < lowerBound)
+                               {
+                                     updateHeading();
+                                     OnRev(OUT_C, power);
+                                     OnFwd(OUT_A, power);
+                                }
+                                Off(OUT_C);
+                                break;
+                         }
+                         else{ TextOut(25,25, "G.T.Error"); break;}
+                    default:
+                         ClearScreen();
+                         TextOut(5,5,"defaultScriptMove");
+                         break;
+             } //end command_name case
+}//end DoScriptCommands case
+
+string nextWord( string str, int from )
+{
+ //parses command strings into seperate strings
+  string word;
+  int i ;
+
+  for (i=from; i<StrLen(str); i++)
+  {
+    if (StrIndex(str, i) == DELIMTERASCIICODE)//space character, in this case
+    {
+        // return string until found delimiter
+        word = SubStr(str, from, i - from);
+        // set for next time
+        from = i + 1;
+        break;
+    }//end if
+  }//end if
+  return word;
+}
+
+sub SetSensors()
+{
+    SetSensorLowspeed(IN_2) //accelerometer
+    SetSensorLowspeed(IN_3); //ultrasonic
+    SetSensorLowspeed(IN_4); //compass
+
+   //average first 10 samplings of compass sensor and
+   //use as originalHeading
+   int x = 0;
+   while (x < 10)
+   {
+        originalHeading = originalHeading + SensorHTCompass(IN_4);
+        x = x + 1;
+   }
+   originalHeading = originalHeading / 10;
+
+}
+
+string updateTime()
+{
+      currentTick = CurrentTick(); //get current timestamp
+      time = currentTick - firstTick;  //calculate time (in milliseconds)
+      //Don's Code: Floating point code that
+      //converts millisecond time to seconds
+      //issues with 32 bit numbers...not a priority to solve right now
+      float x = time / 1000.000;
+
+        int xInt, xFrac;
+        string strInt;
+        string strFrac;
+        string strX;
+        xInt = x;
+        xFrac = (x - xInt) * 1000.0;
+        strFrac = NumToStr(xFrac);
+        if (StrLen(strFrac) == 1)
+          strFrac = StrCat("00", strFrac);
+        else if (StrLen(strFrac) == 2)
+          strFrac = StrCat("0", strFrac);
+
+        strInt = NumToStr(xInt);
+        strX = StrCat(strInt, ".", strFrac);
+
+        return strX; //returns time (in seconds) as a string
+}
+
+
+sub DataLog()
+{
+       /*write robot-critical data to text file
+         that is saved on NXT and can be uploaded
+         by going to Tools --> NXT Explorer */
+        if (result == LDR_FILEEXISTS)
+           result = OpenFileAppend(FILE_NAME, file_size, handle);
+
+           if (result == LDR_SUCCESS)
+           {
+              string time_STR = updateTime();
+               WriteString(handle, " Time: ", x)
+               WriteString(handle, time_STR, x);
+               WriteString(handle, " X axis: ", x)
+               WriteString(handle, str_xval, x);
+               WriteString(handle, " Y axis: ", x)
+               WriteString(handle, str_yval, x);
+               WriteString(handle, " Distance: ", x)
+               WriteString(handle, distance, x);
+               WriteString(handle, " Gyro Heading : ", x)
+               WriteString(handle, str_newHeading, x);
+               WriteString(handle, " B rotations : ", x)
+               WriteString(handle, B_rotation, x);
+               WriteString(handle, "Rover Battery :", x) ;
+               WriteLnString(handle, voltage, x);
+
+            }
+
+}
+
+task main(){
+  DeleteFile(FILE_NAME);
+  firstTick =  FirstTick();
+  result = CreateFile(FILE_NAME, file_size, handle);
+  
+   string ID; //ID is the first letter: a,b,or c
+   string rawinput, input;
+   battery = BatteryLevel();
+  // BTCheck(0); //check master connection
+
+   SetSensors();
+   int w = 0;
+   while(true)
+   {
+     SendSensorData(); //send sensor data via bluetoth
+     ReceiveRemoteString(0, true, rawinput); // get bluetooth message from the computer
+     ClearScreen(); //clear NXT LCD screen
+     TextOut(0, LCD_LINE1, rawinput); //print string on NXT LCD screen
+     //rawinput = "aforward 30";  // FOR TESTING PURPOSES ONLY
+     
+     //identify which type of command rawinput is - real-time driving: a, blind-driving: b
+     ID = SubStr(rawinput, 0, 1);
+     input = SubStr(rawinput, 1, StrLen(rawinput));
+     DataLog(); //log robot critical data to text file
+     
+     if (ID == "a")
+     {
+       //this parses the phrase into the command and the power...
+       int from = 0;
+       string command_name = nextWord(input, from);
+       //get the second argument
+       from = StrLen(command_name) + 1; //get the length of first word + one, and pass
+       string power = SubStr(input, from, StrLen(input) - from);  //get all that's left
+       int powerA = StrToNum(power);
+       
+       DoCommand(command_name, powerA);
+     }
+     else if (ID == "b")
+     {
+             //this parses the rawinput into four seperate words...
+             int from = 0;
+             string command_name = nextWord(input, from);
+
+             //there must be three arguments...let's parse and find them:
+             from = StrLen(command_name) + 1;
+             string direction = nextWord( input, from ) ;
+
+             from = StrLen(command_name) + StrLen(direction) + 2;
+             string power_str = nextWord(input, from);
+             int powerB = StrToNum(power_str);
+
+             string third_str = SubStr(input, from + 3, StrLen(input) - from);
+             int third = StrToNum(third_str);
+
+             DoScriptCommandMove(command_name, direction, powerB, third);
+      }
+
+ else if (ID == "c")   //I really don't have time to refactor right now...
+                       //but c commands have become obsolete except for the camera heading...
+                       //just keep this in here for now (because it works)
+    {
+             //this parses the phrase into two seperate words...
+             int from = 0;
+             string command_name = nextWord(input, from);
+             //get the second argument
+             from = StrLen(command_name) + 1; //get the length of first word + one, and pass
+
+             string second = SubStr(input, from, StrLen(input) - from);  //get all that's left
+
+
+            // string second = nextWord( input, from );
+             TextOut(0, LCD_LINE1, second);
+             Wait(1000);
+      switch (command_name)
+      {
+
+       case "cameraHeading":
+
+           int desiredHeading = StrToNum(second);
+           int upperBound = desiredHeading + 2;
+           int lowerBound = desiredHeading - 2;
+           while (B_mod > upperBound || B_mod < lowerBound)
+           {
+                 TextOut(0, LCD_LINE3, NumToStr(B_mod));
+                 OnFwd(OUT_B, 30);
+                 B_raw = MotorRotationCount(OUT_B);
+                 B_mod = abs(B_raw);
+                 B_mod %= 360;
+           }
+           Off(OUT_B);
+           break;
+       }
+       }
+    else
+    {
+        TextOut(5,5,"No Command");
+        Off(OUT_ABC);
+    }
+	   Wait(100); // 100 milliseconds. We can adjust
+
+   } // end of while
+   CloseFile(handle);
+
+}  //end of main
+
+
+
